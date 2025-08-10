@@ -1,0 +1,82 @@
+================================================================================
+MoE EXPERT IMPORTANCE ANALYSIS REPORT
+Model: openai/gpt-oss-20b
+Analysis Date: 2025-08-10 20:54:17.384994+00:00
+================================================================================
+
+GLOBAL STATISTICS:
+  Total forward passes: 10
+  Total tokens processed: 0
+
+INPUT CATEGORY DISTRIBUTION:
+  code        :     1 (10.0%)
+  factual     :     4 (40.0%)
+  math        :     2 (20.0%)
+  reasoning   :     2 (20.0%)
+  creative    :     1 (10.0%)
+
+EXPERT IMPORTANCE RANKINGS:
+--------------------------------------------------------------------------------
+Rank   Expert   Overall    Activation   Contribution   Specialization   Consistency 
+--------------------------------------------------------------------------------
+1      4        0.3573     0.0552       0.3539         0.3733           0.7995      
+2      8        0.3338     0.0721       0.3986         0.1842           0.7785      
+3      13       0.3257     0.0636       0.3632         0.1774           0.8111      
+4      11       0.3179     0.0665       0.3211         0.2067           0.8016      
+5      14       0.3138     0.0467       0.3765         0.1252           0.8091      
+6      9        0.3120     0.0622       0.4139         0.0582           0.7877      
+7      12       0.3115     0.0679       0.4029         0.0703           0.7812      
+8      10       0.3107     0.0537       0.3203         0.1838           0.8087      
+9      5        0.3089     0.0736       0.3383         0.1212           0.8055      
+10     0        0.3082     0.0594       0.3147         0.1856           0.7942      
+11     1        0.3067     0.0679       0.3286         0.1235           0.8155      
+12     15       0.2996     0.0523       0.2801         0.1799           0.8195      
+13     7        0.2941     0.0665       0.3826         0.0064           0.7903      
+14     3        0.2913     0.0566       0.3022         0.1062           0.8123      
+15     2        0.2891     0.0707       0.2874         0.1144           0.7939      
+16     6        0.2842     0.0651       0.2372         0.1357           0.8319      
+
+EXPERT SPECIALIZATIONS:
+--------------------------------------------------------------------------------
+
+Expert 0:
+  Total activations: 42
+  Specialized in:
+    - factual: 50.0%
+    - code: 16.7%
+    - reasoning: 16.7%
+  Most active in layer: 21
+
+Expert 1:
+  Total activations: 48
+  Specialized in:
+    - factual: 45.8%
+    - reasoning: 25.0%
+    - code: 22.9%
+  Most active in layer: 8
+
+Expert 2:
+  Total activations: 50
+  Specialized in:
+    - math: 36.0%
+    - factual: 34.0%
+    - code: 10.0%
+  Most active in layer: 19
+
+Expert 3:
+  Total activations: 40
+  Specialized in:
+    - factual: 37.5%
+    - math: 25.0%
+    - reasoning: 22.5%
+  Most active in layer: 15
+
+Expert 4:
+  Total activations: 39
+  Specialized in:
+    - factual: 64.1%
+    - code: 23.1%
+    - reasoning: 7.7%
+  Most active in layer: 0
+
+================================================================================
