@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import numpy as np
+from collections import defaultdict, Counter
 
 import modal
 from modal import App, Image, method, enter, Secret
@@ -185,7 +186,7 @@ def quantize_expert_weights(tensor, bits: int = 8):
 
 @app.cls(
     image=image,
-    gpu="H200",  # GPT-OSS 20B needs more memory
+    gpu="H100:4",  # Using 4 H100 GPUs for distributed processing
     volumes={"/cache": volume},
     timeout=3600,
     scaledown_window=300,
@@ -370,6 +371,277 @@ class GPTOSSProcessor:
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
         return generated_text
+    
+    @method()
+    def analyze_expert_usage(
+        self,
+        model_id: str = "openai/gpt-oss-20b",
+        task_prompts: Optional[Dict[str, List[str]]] = None,
+        max_length: int = 100,
+        temperature: float = 0.0,  # Use 0 for deterministic routing
+        load_in_8bit: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Analyze which experts are activated for different task types.
+        
+        Args:
+            model_id: Hugging Face model ID
+            task_prompts: Dictionary mapping task categories to prompts
+            max_length: Maximum generation length
+            temperature: Sampling temperature (0 for deterministic)
+            load_in_8bit: Whether to use 8-bit quantization
+        
+        Returns:
+            Dictionary with expert usage statistics per task
+        """
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        
+        # Default task prompts covering different domains
+        if task_prompts is None:
+            task_prompts = {
+                "coding": [
+                    "def fibonacci(n):",
+                    "class BinaryTree:",
+                    "import numpy as np\n# Calculate matrix multiplication",
+                    "SELECT * FROM users WHERE",
+                    "// Write a function to reverse a linked list",
+                ],
+                "math": [
+                    "Solve for x: 2x^2 + 5x - 3 = 0",
+                    "The derivative of sin(x) * cos(x) is",
+                    "Calculate the integral of 1/x from 1 to e:",
+                    "If a triangle has sides 3, 4, and 5, its area is",
+                    "The limit as x approaches 0 of sin(x)/x equals",
+                ],
+                "science": [
+                    "The process of photosynthesis converts",
+                    "Newton's second law states that F =",
+                    "DNA replication occurs during the",
+                    "The speed of light in vacuum is approximately",
+                    "Chemical formula for sulfuric acid is",
+                ],
+                "creative": [
+                    "Once upon a time in a distant galaxy,",
+                    "The old mansion stood silent, its windows",
+                    "She picked up the mysterious letter and read:",
+                    "The sunset painted the sky in shades of",
+                    "In the year 2150, humanity discovered",
+                ],
+                "factual": [
+                    "The capital of France is",
+                    "World War II ended in the year",
+                    "The largest planet in our solar system is",
+                    "The author of '1984' is",
+                    "The chemical symbol for gold is",
+                ],
+                "reasoning": [
+                    "If all roses are flowers and some flowers fade quickly, then",
+                    "John is taller than Mary. Mary is taller than Sue. Therefore,",
+                    "If it rains, the ground gets wet. The ground is wet. Can we conclude",
+                    "A store offers 20% off. If an item costs $50 after discount, the original price was",
+                    "Three friends split a bill equally. If each pays $15, the total bill was",
+                ],
+            }
+        
+        print(f"Loading model: {model_id}")
+        
+        # Load model and tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
+        model_kwargs = {
+            "trust_remote_code": True,
+            "device_map": "auto",
+            "torch_dtype": torch.float16 if load_in_8bit else torch.bfloat16,
+        }
+        
+        if load_in_8bit:
+            model_kwargs["load_in_8bit"] = True
+        
+        model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
+        
+        # Storage for expert activation patterns
+        expert_activations = defaultdict(lambda: defaultdict(list))
+        task_expert_counts = defaultdict(Counter)
+        
+        # Hook to track expert routing
+        def create_hook(task_type, prompt_idx):
+            def hook_fn(module, input, output):
+                # Different MoE implementations have different output structures
+                if hasattr(output, 'router_logits'):
+                    router_logits = output.router_logits
+                elif hasattr(module, 'gate') and hasattr(module.gate, 'forward'):
+                    # For models with explicit gate modules
+                    with torch.no_grad():
+                        router_logits = module.gate(input[0])
+                elif hasattr(output, 'topk_indices'):
+                    # Some models directly output selected expert indices
+                    experts_used = output.topk_indices.cpu().numpy().flatten().tolist()
+                    expert_activations[task_type][prompt_idx].extend(experts_used)
+                    for expert_idx in experts_used:
+                        task_expert_counts[task_type][expert_idx] += 1
+                    return
+                else:
+                    return
+                
+                # Get top-k experts (usually top-2 for GPT-OSS)
+                if router_logits is not None:
+                    topk_values, topk_indices = torch.topk(router_logits, k=min(2, router_logits.size(-1)))
+                    experts_used = topk_indices.cpu().numpy().flatten().tolist()
+                    expert_activations[task_type][prompt_idx].extend(experts_used)
+                    for expert_idx in experts_used:
+                        task_expert_counts[task_type][expert_idx] += 1
+            
+            return hook_fn
+        
+        # Register hooks for MoE layers
+        hooks = []
+        for name, module in model.named_modules():
+            # Look for MoE-related modules
+            if any(keyword in name.lower() for keyword in ['moe', 'expert', 'router', 'gate']):
+                # Skip the actual expert modules, only track routing
+                if 'experts.' not in name and 'expert_' not in name:
+                    for task_type in task_prompts:
+                        for prompt_idx in range(len(task_prompts[task_type])):
+                            hook = module.register_forward_hook(create_hook(task_type, prompt_idx))
+                            hooks.append(hook)
+        
+        # Analyze each task category
+        results = {
+            'task_analysis': {},
+            'expert_specialization': {},
+            'cross_task_similarity': {},
+            'summary': {}
+        }
+        
+        all_expert_usage = defaultdict(Counter)
+        
+        for task_type, prompts in task_prompts.items():
+            print(f"\nAnalyzing {task_type} tasks...")
+            task_outputs = []
+            
+            for idx, prompt in enumerate(prompts):
+                inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(model.device)
+                
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=max_length,
+                        temperature=temperature,
+                        do_sample=temperature > 0,
+                        pad_token_id=tokenizer.pad_token_id,
+                    )
+                
+                # Decode output
+                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                task_outputs.append(generated_text)
+            
+            # Aggregate expert usage for this task
+            task_expert_usage = task_expert_counts[task_type]
+            all_expert_usage[task_type] = task_expert_usage
+            
+            # Calculate statistics
+            total_activations = sum(task_expert_usage.values())
+            unique_experts = len(task_expert_usage)
+            
+            results['task_analysis'][task_type] = {
+                'total_prompts': len(prompts),
+                'unique_experts_used': unique_experts,
+                'total_activations': total_activations,
+                'top_5_experts': dict(task_expert_usage.most_common(5)),
+                'expert_distribution': {
+                    int(expert): count / total_activations 
+                    for expert, count in task_expert_usage.items()
+                } if total_activations > 0 else {},
+                'sample_outputs': task_outputs[:2],  # Store first 2 outputs as samples
+            }
+        
+        # Remove hooks
+        for hook in hooks:
+            hook.remove()
+        
+        # Analyze expert specialization
+        all_experts = set()
+        for task_usage in all_expert_usage.values():
+            all_experts.update(task_usage.keys())
+        
+        expert_task_affinity = defaultdict(dict)
+        for expert in all_experts:
+            total_uses = sum(all_expert_usage[task].get(expert, 0) for task in task_prompts.keys())
+            if total_uses > 0:
+                for task in task_prompts.keys():
+                    task_uses = all_expert_usage[task].get(expert, 0)
+                    expert_task_affinity[expert][task] = task_uses / total_uses
+        
+        # Identify specialized experts
+        specialized_experts = {}
+        generalist_experts = []
+        
+        for expert, affinities in expert_task_affinity.items():
+            if affinities:
+                max_affinity = max(affinities.values())
+                num_tasks = len([a for a in affinities.values() if a > 0.1])
+                
+                if max_affinity > 0.6:  # Expert used >60% for one task type
+                    specialized_task = max(affinities, key=affinities.get)
+                    specialized_experts[expert] = {
+                        'primary_task': specialized_task,
+                        'affinity': max_affinity,
+                        'task_distribution': affinities
+                    }
+                elif num_tasks >= 3:  # Expert used across 3+ tasks
+                    generalist_experts.append(expert)
+        
+        results['expert_specialization'] = {
+            'specialized_experts': specialized_experts,
+            'generalist_experts': generalist_experts,
+            'total_experts_activated': len(all_experts),
+        }
+        
+        # Calculate cross-task similarity
+        similarity_matrix = {}
+        for task1 in task_prompts.keys():
+            similarity_matrix[task1] = {}
+            experts1 = set(all_expert_usage[task1].keys())
+            
+            for task2 in task_prompts.keys():
+                experts2 = set(all_expert_usage[task2].keys())
+                
+                if experts1 and experts2:
+                    # Jaccard similarity
+                    intersection = len(experts1 & experts2)
+                    union = len(experts1 | experts2)
+                    similarity = intersection / union if union > 0 else 0
+                else:
+                    similarity = 0
+                
+                similarity_matrix[task1][task2] = similarity
+        
+        results['cross_task_similarity'] = similarity_matrix
+        
+        # Generate summary
+        results['summary'] = {
+            'total_unique_experts': len(all_experts),
+            'num_specialized_experts': len(specialized_experts),
+            'num_generalist_experts': len(generalist_experts),
+            'most_active_expert': max(
+                [(e, sum(usage.get(e, 0) for usage in all_expert_usage.values())) 
+                 for e in all_experts],
+                key=lambda x: x[1]
+            )[0] if all_experts else None,
+            'task_with_most_experts': max(
+                results['task_analysis'].items(),
+                key=lambda x: x[1]['unique_experts_used']
+            )[0] if results['task_analysis'] else None,
+        }
+        
+        # Clean up
+        del model
+        torch.cuda.empty_cache()
+        
+        return results
     
     @method()
     def optimize_experts(
@@ -876,6 +1148,9 @@ def main(
     reduction_method: str = "magnitude_prune",  # magnitude_prune, rank_reduce, quantize, combined
     reduction_factor: float = 0.5,
     target_experts: str = None,  # Comma-separated list for reduction
+    # Expert usage analysis parameters
+    tasks: str = None,  # Comma-separated list of task types for expert analysis
+    temperature: float = 0.0,  # Temperature for expert usage analysis
 ):
     """
     Modal CLI for GPT-OSS model operations.
@@ -909,6 +1184,16 @@ def main(
         
         # Push optimized model to HuggingFace Hub
         modal run gpt_oss_modal.py --action optimize --optimization-mode both --num-experts-remove 8 --reduction-factor 0.3 --output-repo username/gpt-oss-optimized
+        
+        # EXPERT USAGE ANALYSIS EXAMPLES:
+        # Analyze which experts are used for different task types
+        modal run gpt_oss_modal.py --action expert-usage
+        
+        # Analyze specific task categories
+        modal run gpt_oss_modal.py --action expert-usage --tasks "coding,math,science"
+        
+        # Analyze with stochastic routing (temperature > 0)
+        modal run gpt_oss_modal.py --action expert-usage --temperature 0.5
     """
     processor = GPTOSSProcessor()
     
@@ -1028,13 +1313,117 @@ def main(
             print(f"Pushed to Hub: {result['hub_repo']}")
         elif "hub_error" in result:
             print(f"Hub push error: {result['hub_error']}")
+    
+    elif action == "expert-usage":
+        print("Analyzing expert usage patterns for different tasks...")
+        
+        # Prepare task prompts
+        task_prompts = None
+        if tasks:
+            # Filter to specific tasks
+            all_tasks = {
+                "coding": [
+                    "def fibonacci(n):",
+                    "class BinaryTree:",
+                    "import numpy as np\n# Calculate matrix multiplication",
+                ],
+                "math": [
+                    "Solve for x: 2x^2 + 5x - 3 = 0",
+                    "The derivative of sin(x) * cos(x) is",
+                    "Calculate the integral of 1/x from 1 to e:",
+                ],
+                "science": [
+                    "The process of photosynthesis converts",
+                    "Newton's second law states that F =",
+                    "DNA replication occurs during the",
+                ],
+                "creative": [
+                    "Once upon a time in a distant galaxy,",
+                    "The old mansion stood silent, its windows",
+                    "She picked up the mysterious letter and read:",
+                ],
+                "factual": [
+                    "The capital of France is",
+                    "World War II ended in the year",
+                    "The largest planet in our solar system is",
+                ],
+                "reasoning": [
+                    "If all roses are flowers and some flowers fade quickly, then",
+                    "John is taller than Mary. Mary is taller than Sue. Therefore,",
+                    "A store offers 20% off. If an item costs $50 after discount, the original price was",
+                ],
+            }
+            
+            task_list = [t.strip() for t in tasks.split(',')]
+            task_prompts = {t: all_tasks[t] for t in task_list if t in all_tasks}
+        
+        print(f"Temperature: {temperature} (0=deterministic routing)")
+        print(f"Max generation length: {max_tokens}")
+        
+        result = processor.analyze_expert_usage.remote(
+            model_id=model_id,
+            task_prompts=task_prompts,
+            max_length=max_tokens,
+            temperature=temperature,
+            load_in_8bit=use_8bit,
+        )
+        
+        print("\n=== Expert Usage Analysis Results ===")
+        
+        # Print summary
+        summary = result.get('summary', {})
+        print(f"\nSummary:")
+        print(f"  Total Unique Experts Activated: {summary.get('total_unique_experts', 0)}")
+        print(f"  Specialized Experts: {summary.get('num_specialized_experts', 0)}")
+        print(f"  Generalist Experts: {summary.get('num_generalist_experts', 0)}")
+        
+        if summary.get('most_active_expert') is not None:
+            print(f"  Most Active Expert: Expert {summary['most_active_expert']}")
+        
+        if summary.get('task_with_most_experts'):
+            print(f"  Task with Most Experts: {summary['task_with_most_experts']}")
+        
+        # Task analysis
+        print(f"\nTask Analysis:")
+        for task, info in result.get('task_analysis', {}).items():
+            print(f"\n  {task.capitalize()}:")
+            print(f"    Unique experts used: {info['unique_experts_used']}")
+            print(f"    Total activations: {info['total_activations']}")
+            if info['top_5_experts']:
+                top_experts = ', '.join(f"E{e}({c})" for e, c in info['top_5_experts'].items())
+                print(f"    Top 5 experts: {top_experts}")
+        
+        # Expert specialization
+        specialized = result.get('expert_specialization', {}).get('specialized_experts', {})
+        if specialized:
+            print(f"\nSpecialized Experts (showing first 5):")
+            for expert_id, spec in list(specialized.items())[:5]:
+                print(f"  Expert {expert_id}: {spec['primary_task']} specialist ({spec['affinity']:.2%})")
+        
+        # Cross-task similarity
+        similarity = result.get('cross_task_similarity', {})
+        if similarity:
+            print(f"\nCross-Task Similarity (expert overlap):")
+            tasks_list = list(similarity.keys())
+            if len(tasks_list) > 1:
+                # Find most similar task pair
+                max_sim = 0
+                similar_pair = None
+                for t1 in tasks_list:
+                    for t2 in tasks_list:
+                        if t1 != t2 and similarity[t1][t2] > max_sim:
+                            max_sim = similarity[t1][t2]
+                            similar_pair = (t1, t2)
+                
+                if similar_pair:
+                    print(f"  Most similar tasks: {similar_pair[0]} and {similar_pair[1]} (similarity: {max_sim:.2f})")
             
     else:
         print(f"Unknown action: {action}")
-        print("Available actions: analyze, inspect, inference, prune, optimize")
+        print("Available actions: analyze, inspect, inference, prune, optimize, expert-usage")
 
 # Optional: Standalone function for programmatic use
-@app.function(image=image, gpu="H200", volumes={"/cache": volume})
+@app.function(image=image, gpu="H100:4", volumes={"/cache": volume})
 def run_gpt_oss_inference(
     prompt: str,
     max_tokens: int = 100,

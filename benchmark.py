@@ -20,7 +20,10 @@ import modal
 
 app = modal.App("mmlu-benchmark")
 
-cur_model = "openai/gpt-oss-20b"
+# Default model - can be overridden with --model flag
+# darrow8/pico-model 
+# openai/gpt-oss-20b
+DEFAULT_MODEL = "openai/gpt-oss-20b"
 # ---------- Image / Environment ----------
 # Build a container image with all deps. We install CUDA-enabled torch wheels.
 image = (
@@ -41,11 +44,11 @@ HF_SECRET = modal.Secret.from_name("huggingface-token")
 @app.function(
     image=image,
     secrets=[HF_SECRET],
-    gpu="H100",            # or "H100" if available
+    gpu="H100:4",  # Using 4 H100 GPUs for distributed processing
     timeout=60 * 60,       # 1 hour
 )
 def run_mmlu_remote(
-    model_name: str = cur_model,
+    model_name: str = DEFAULT_MODEL,
     k_shot: int = 3,
     max_new_tokens: int = 2,
     temperature: float = 0.0,
@@ -208,36 +211,41 @@ def run_mmlu_remote(
 # ---------- Local entrypoint ----------
 @app.local_entrypoint()
 def main(
-    model: str = cur_model,
+    model: str = DEFAULT_MODEL,
     k_shot: int = 5,
-    limit: int = 100,             # default 100; use -1 for full test split
+    limit: int = 100,
     max_new_tokens: int = 2,
     temperature: float = 0.0,
-    gpu: str = "H100"             # "A100" or "H100"
 ):
     """
-    You can pass args when running the script, e.g.:
-      python benchmark.py --model openai/gpt-oss-20b --k-shot 5 --limit 100 --gpu A100
+    Run MMLU benchmark on a model using Modal.
+    
+    Usage examples:
+      # Run with default model
+      modal run benchmark.py
+      
+      # Run with specific model  
+      modal run benchmark.py --model openai/gpt-oss-20b
+      
+      # Run with custom parameters
+      modal run benchmark.py --model darrow8/gpt-oss-16experts --k-shot 5 --limit 100
+      
+      # Run full test (no limit)
+      modal run benchmark.py --model darrow8/model-reduced --limit -1
     """
-    # Parse flags given to the Python script
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--model", type=str, default=model)
-    parser.add_argument("--k-shot", type=int, default=k_shot)
-    parser.add_argument("--limit", type=int, default=limit)
-    parser.add_argument("--max-new-tokens", type=int, default=max_new_tokens)
-    parser.add_argument("--temperature", type=float, default=temperature)
-    parser.add_argument("--gpu", type=str, default=gpu)
-    args, _ = parser.parse_known_args()
-
-    # Modal resources (e.g., GPU) are configured on the function decorator.
-    # Per-call overrides like `.options(gpu=...)` are not supported.
-    if args.gpu and args.gpu.upper() != "A100":
-        print(f"Warning: requested GPU '{args.gpu}' is ignored. Edit the @app.function(gpu=...) decorator to change it.")
+    # Print configuration
+    print(f"\n=== MMLU Benchmark Configuration ===")
+    print(f"Model: {model}")
+    print(f"K-shot: {k_shot}")
+    print(f"Limit per subject: {limit if limit > 0 else 'Full test'}")
+    print(f"Max new tokens: {max_new_tokens}")
+    print(f"Temperature: {temperature}")
+    print("=====================================\n")
 
     run_mmlu_remote.remote(
-        model_name=args.model,
-        k_shot=args.k_shot,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        limit_per_subject=args.limit,
+        model_name=model,
+        k_shot=k_shot,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        limit_per_subject=limit,
     )
