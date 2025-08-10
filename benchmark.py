@@ -1,4 +1,4 @@
-# Run MMLU on Qwen/Qwen3-4B-Instruct-2507 using Modal.com
+# Run MMLU on a model using Modal.com
 #
 # Usage (from your terminal):
 #   pip install modal
@@ -8,7 +8,7 @@
 #   python benchmark.py
 #
 # Optional flags:
-#   python benchmark.py --model Qwen/Qwen3-4B-Instruct-2507 --k-shot 5 --limit -1 --gpu A100
+#   python benchmark.py --model Qwen/Qwen3-4B-Instruct-2507 --k-shot 5 --limit 100 --gpu A100
 #
 # Notes:
 # - This script expects a Modal secret named "huggingface-token" that exposes env var HF_TOKEN.
@@ -18,8 +18,9 @@
 import argparse
 import modal
 
-app = modal.App("qwen-mmlu-benchmark")
+app = modal.App("mmlu-benchmark")
 
+cur_model = "openai/gpt-oss-20b"
 # ---------- Image / Environment ----------
 # Build a container image with all deps. We install CUDA-enabled torch wheels.
 image = (
@@ -40,15 +41,15 @@ HF_SECRET = modal.Secret.from_name("huggingface-token")
 @app.function(
     image=image,
     secrets=[HF_SECRET],
-    gpu="A100",            # or "H100" if available
+    gpu="H100",            # or "H100" if available
     timeout=60 * 60,       # 1 hour
 )
 def run_mmlu_remote(
-    model_name: str = "Qwen/Qwen3-4B-Instruct-2507",
+    model_name: str = cur_model,
     k_shot: int = 3,
     max_new_tokens: int = 2,
     temperature: float = 0.0,
-    limit_per_subject: int = -1,  # -1 = full test split
+    limit_per_subject: int = 100,  # per-subject cap (use -1 for full test split)
     seed: int = 123,
 ):
     import os
@@ -207,16 +208,16 @@ def run_mmlu_remote(
 # ---------- Local entrypoint ----------
 @app.local_entrypoint()
 def main(
-    model: str = "Qwen/Qwen3-4B-Instruct-2507",
+    model: str = cur_model,
     k_shot: int = 5,
-    limit: int = -1,              # -1 = full test split
+    limit: int = 100,             # default 100; use -1 for full test split
     max_new_tokens: int = 2,
     temperature: float = 0.0,
-    gpu: str = "A100"             # "A100" or "H100"
+    gpu: str = "H100"             # "A100" or "H100"
 ):
     """
     You can pass args when running the script, e.g.:
-      python benchmark.py --model Qwen/Qwen3-4B-Instruct-2507 --k-shot 5 --limit -1 --gpu A100
+      python benchmark.py --model openai/gpt-oss-20b --k-shot 5 --limit 100 --gpu A100
     """
     # Parse flags given to the Python script
     parser = argparse.ArgumentParser(add_help=False)
